@@ -200,7 +200,10 @@ bot.start(async (ctx) => {
       user = { uuid, relay_token: relayToken, is_premium: false };
       ctx.deleteMessage(msg.message_id);
     } catch (err) {
-      return ctx.reply('❌ خطا در اتصال به سرور مرکزی.');
+      console.error('🔴 خطای ساخت کلاینت:', err.message);
+      return ctx.reply(
+        `❌ خطا در اتصال به سرور مرکزی.\nدلیل فنی: ${err.message}`,
+      );
     }
   }
 
