@@ -12,7 +12,6 @@ const cron = require('node-cron');
 
 require('dotenv').config();
 
-// 1. تنظیمات اولیه
 const PORT = process.env.PORT || 8080;
 const AZURE_DOMAIN = process.env.WEBSITE_HOSTNAME || 'localhost';
 const supabase = createClient(
@@ -29,11 +28,10 @@ const REQUIRED_CHANNELS = (process.env.REQUIRED_CHANNELS || '')
   .split(',')
   .filter((c) => c.trim());
 
-// 2. توابع سنایی
+// --- توابع کمکی سنایی ---
 const xuiClient = axios.create({
   timeout: 10000,
-  httpsAgent: new https.Agent({ rejectUnauthorized: false }), // رفع خطای SSL سنایی
-  headers: { 'User-Agent': 'Mozilla/5.0' },
+  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
 });
 
 async function xuiLogin() {
@@ -43,44 +41,39 @@ async function xuiLogin() {
   });
   try {
     const res = await xuiClient.post(`${XUI_URL}/login`, payload, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       maxRedirects: 0,
     });
     return res.headers['set-cookie'][0].split(';')[0];
   } catch (e) {
-    if (
-      e.response &&
-      (e.response.status === 302 || e.response.status === 303)
-    ) {
+    if (e.response && e.response.status === 302)
       return e.response.headers['set-cookie'][0].split(';')[0];
-    }
-    throw new Error('لاگین سنایی ناموفق');
+    throw new Error('XUI Login Failed');
   }
 }
 
 async function createSanaeiClient(uuid, tgId, gbLimit) {
   const cookie = await xuiLogin();
   const limitBytes = gbLimit > 0 ? Math.floor(gbLimit * 1024 * 1024 * 1024) : 0;
-  const clientSettings = {
-    id: uuid,
-    flow: '',
-    email: `tg_${tgId}`,
-    limitIp: 2,
-    totalGB: limitBytes,
-    expiryTime: 0,
-    enable: true,
-    tgId: tgId.toString(),
-    subId: uuidv4(),
-  };
-  const res = await xuiClient.post(
+  const settings = JSON.stringify({
+    clients: [
+      {
+        id: uuid,
+        flow: '',
+        email: `tg_${tgId}`,
+        limitIp: 2,
+        totalGB: limitBytes,
+        expiryTime: 0,
+        enable: true,
+        tgId: tgId.toString(),
+        subId: crypto.randomUUID(),
+      },
+    ],
+  });
+  await xuiClient.post(
     `${XUI_URL}/panel/api/inbounds/addClient`,
-    {
-      id: XUI_INBOUND_ID,
-      settings: JSON.stringify({ clients: [clientSettings] }),
-    },
-    { headers: { Cookie: cookie, 'Content-Type': 'application/json' } },
+    { id: XUI_INBOUND_ID, settings },
+    { headers: { Cookie: cookie } },
   );
-  if (!res.data.success) throw new Error(res.data.msg);
 }
 
 async function getSanaeiUsage(email) {
@@ -89,14 +82,12 @@ async function getSanaeiUsage(email) {
     `${XUI_URL}/panel/api/inbounds/getClientTraffics/${email}`,
     { headers: { Cookie: cookie } },
   );
-  if (res.data.success && res.data.obj) {
-    const total = (res.data.obj.up || 0) + (res.data.obj.down || 0);
-    return (total / (1024 * 1024 * 1024)).toFixed(3);
-  }
-  return 0;
+  return res.data.success && res.data.obj
+    ? ((res.data.obj.up + res.data.obj.down) / 1024 ** 3).toFixed(3)
+    : 0;
 }
 
-// 3. سیستم کش رله
+// --- سیستم کش ---
 let routingCache = {};
 async function updateRoutingCache() {
   try {
@@ -105,200 +96,135 @@ async function updateRoutingCache() {
       .select('relay_token');
     if (data) {
       const newCache = {};
-      const cleanTarget = TARGET_SERVER.replace(':443', '').replace(':80', '');
-      const finalUrl = TARGET_SERVER.includes(':443')
-        ? `https://${cleanTarget}`
-        : `http://${cleanTarget}`;
+      const cleanHost = TARGET_SERVER.split(':')[0];
+      const finalUrl = `https://${TARGET_SERVER}`; // فرض بر 443 و TLS سنایی
       data.forEach((u) => {
         newCache[`/${u.relay_token}`] = {
           url: finalUrl,
           realPath: TARGET_PATH,
-          customHost: cleanTarget,
+          host: cleanHost,
         };
       });
       routingCache = newCache;
-      console.log(
-        `✅ [CACHE] Updated: ${Object.keys(routingCache).length} Active Users`,
-      );
+      console.log(`✅ Cache Updated: ${data.length} users`);
     }
   } catch (e) {
-    console.error('❌ Cache update failed');
+    console.error('Cache Error');
   }
 }
 updateRoutingCache();
 setInterval(updateRoutingCache, 60000);
 
-// 4. ربات تلگرام
-async function checkJoin(ctx) {
+// --- ربات تلگرام ---
+const checkJoin = async (ctx) => {
   if (REQUIRED_CHANNELS.length === 0) return true;
-  for (const channel of REQUIRED_CHANNELS) {
+  for (const c of REQUIRED_CHANNELS) {
     try {
-      const member = await bot.telegram.getChatMember(
-        channel.trim(),
-        ctx.from.id,
-      );
-      if (['left', 'kicked'].includes(member.status)) return false;
+      const m = await bot.telegram.getChatMember(c.trim(), ctx.from.id);
+      if (['left', 'kicked'].includes(m.status)) return false;
     } catch (e) {
       return false;
     }
   }
   return true;
-}
+};
 
 const mainMenu = Markup.inlineKeyboard([
-  [Markup.button.callback('🚀 دریافت / مشاهده کانفیگ', 'get_config')],
+  [Markup.button.callback('🚀 دریافت کانفیگ', 'get_config')],
   [Markup.button.callback('📊 استعلام مصرف', 'check_usage')],
-  [Markup.button.callback('💎 خرید VIP (نامحدود)', 'buy_vip')],
 ]);
 
 bot.start(async (ctx) => {
-  const isJoined = await checkJoin(ctx);
-  if (!isJoined) {
+  if (!(await checkJoin(ctx)))
     return ctx.reply(
-      `👋 سلام!\nبرای استفاده از ربات باید در کانال عضو باشید:`,
-      Markup.inlineKeyboard([
-        ...REQUIRED_CHANNELS.map((c) => [
+      '⚠️ ابتدا عضو کانال شوید.',
+      Markup.inlineKeyboard(
+        REQUIRED_CHANNELS.map((c) => [
           Markup.button.url(
-            `📢 عضویت در کانال`,
+            `عضویت در ${c}`,
             `https://t.me/${c.replace('@', '')}`,
           ),
         ]),
-        [Markup.button.callback('✅ عضو شدم (تایید)', 'get_config')],
-      ]),
+      ),
     );
-  }
-  ctx.reply(
-    `خوش آمدید! برای دریافت سرویس از دکمه‌های زیر استفاده کنید.`,
-    mainMenu,
-  );
+  ctx.reply(`سلام ${ctx.from.first_name}! خوش آمدید.`, mainMenu);
 });
 
 bot.action('get_config', async (ctx) => {
-  if (!(await checkJoin(ctx)))
-    return ctx.answerCbQuery('❌ ابتدا عضو کانال شوید', { show_alert: true });
-  await ctx.answerCbQuery('⌛️ در حال دریافت...');
-
+  const tgId = ctx.from.id;
   let { data: user } = await supabase
     .from('telegram_users')
     .select('*')
-    .eq('tg_id', ctx.from.id)
+    .eq('tg_id', tgId)
     .single();
-
   if (!user) {
     try {
-      const uuid = uuidv4();
-      const relayToken = `usr-${Math.random().toString(36).substr(2, 8)}`;
-      await createSanaeiClient(uuid, ctx.from.id, 0.5);
+      const uuid = uuidv4(),
+        token = `usr-${Math.random().toString(36).substr(2, 8)}`;
+      await createSanaeiClient(uuid, tgId, 0.5);
       const { data } = await supabase
         .from('telegram_users')
-        .insert([{ tg_id: ctx.from.id, uuid, relay_token: relayToken }])
+        .insert([{ tg_id: tgId, uuid, relay_token: token }])
         .select()
         .single();
       user = data;
       await updateRoutingCache();
     } catch (e) {
-      return ctx.reply(`❌ خطا: ${e.message}`);
+      return ctx.reply('خطا در ساخت کانفیگ.');
     }
   }
-
-  const vless = `vless://${user.uuid}@${AZURE_DOMAIN}:443?type=ws&security=tls&path=/${user.relay_token}&host=${AZURE_DOMAIN}&sni=${AZURE_DOMAIN}#Azure-${ctx.from.id}`;
-  ctx.reply(
-    `✅ <b>سرویس شما فعال است</b>\n\nکانفیگ شما:\n\n<code>${vless}</code>\n\n📌 سقف مصرف: ۵۰۰ مگابایت روزانه`,
-    { parse_mode: 'HTML', ...mainMenu },
-  );
+  const vless = `vless://${user.uuid}@${AZURE_DOMAIN}:443?type=ws&security=tls&path=/${user.relay_token}&host=${AZURE_DOMAIN}&sni=${AZURE_DOMAIN}#Azure-${tgId}`;
+  ctx.reply(`✅ کانفیگ شما:\n\n<code>${vless}</code>`, {
+    parse_mode: 'HTML',
+    ...mainMenu,
+  });
 });
 
 bot.action('check_usage', async (ctx) => {
-  try {
-    const usage = await getSanaeiUsage(`tg_${ctx.from.id}`);
-    const { data } = await supabase
-      .from('telegram_users')
-      .select('is_premium')
-      .eq('tg_id', ctx.from.id)
-      .single();
-    ctx.reply(
-      `📊 گزارش مصرف:\n🔹 مصرف شده: ${usage} GB\n🔋 وضعیت: ${data?.is_premium ? 'VIP' : 'رایگان (0.5GB)'}`,
-      mainMenu,
-    );
-  } catch (e) {
-    ctx.answerCbQuery('خطا در استعلام');
-  }
+  const usage = await getSanaeiUsage(`tg_${ctx.from.id}`);
+  ctx.reply(`📊 مصرف: ${usage} GB / 0.500 GB`, mainMenu);
 });
 
-// 5. پروکسی و رله (حل مشکل فقط آپلود)
+// --- رله پروکسی (دقیقاً مشابه نسخه ساده و کاربری) ---
 const app = express();
-app.use(express.json());
 const proxy = httpProxy.createProxyServer({
   changeOrigin: true,
   secure: false,
   ws: true,
-  xfwd: true,
-});
-
-// جلوگیری از بافر شدن ترافیک در آژور
-proxy.on('proxyRes', (pRes) => {
-  pRes.headers['X-Accel-Buffering'] = 'no';
 });
 
 app.use((req, res, next) => {
-  if (req.url.startsWith('/api') || req.url.startsWith('/telegraf'))
+  if (req.url.startsWith('/telegraf') || req.url.startsWith('/api'))
     return next();
-  const token = `/${req.url.split('?')[0].replace(/\/+/g, '/').split('/')[1]}`;
+  const token = '/' + req.url.split('/')[1].split('?')[0];
   const targetData = routingCache[token];
-
   if (targetData) {
     req.url = req.url.replace(token, targetData.realPath).replace(/\/\//g, '/');
-    req.headers['host'] = targetData.customHost;
-    delete req.headers['origin'];
-    delete req.headers['referer'];
+    req.headers['host'] = targetData.host;
     proxy.web(req, res, { target: targetData.url });
   } else {
-    res.status(200).send('Azure SaaS Active');
+    res.status(200).send('Azure Relay Active');
   }
 });
 
 const server = http.createServer(app);
-
-// 🔴 قلب تپنده: مدیریت وب‌سوکت اصلاح شده برای آژور
 server.on('upgrade', (req, socket, head) => {
-  const token = `/${req.url.split('?')[0].replace(/\/+/g, '/').split('/')[1]}`;
+  const token = '/' + req.url.split('/')[1].split('?')[0];
   const targetData = routingCache[token];
-
   if (targetData) {
-    console.log(`🔌 [WS] Routing ${token} -> ${targetData.url}`);
-
-    // بازنویسی دقیق URL
     req.url = req.url.replace(token, targetData.realPath).replace(/\/\//g, '/');
-
-    // تثبیت هدرهای وب‌سوکت برای جلوگیری از دخالت آژور
-    req.headers['host'] = targetData.customHost;
-    req.headers['connection'] = 'upgrade';
-    req.headers['upgrade'] = 'websocket';
-
-    // حذف هدرهای محدودکننده
-    delete req.headers['origin'];
-    delete req.headers['referer'];
-
-    proxy.ws(req, socket, head, {
-      target: targetData.url,
-      headers: {
-        host: targetData.customHost,
-        connection: 'upgrade',
-        upgrade: 'websocket',
-      },
-    });
+    req.headers['host'] = targetData.host;
+    proxy.ws(req, socket, head, { target: targetData.url });
   } else {
     socket.destroy();
   }
 });
 
-// 6. اجرای نهایی
 const SECRET_PATH = `/telegraf/${bot.secretPathComponent()}`;
 app.use(bot.webhookCallback(SECRET_PATH));
 
 server.listen(PORT, async () => {
-  console.log(`🚀 Azure Bot-Relay Listening on Port ${PORT}`);
-  if (AZURE_DOMAIN !== 'localhost') {
+  console.log(`🚀 Relay running on ${PORT}`);
+  if (AZURE_DOMAIN !== 'localhost')
     await bot.telegram.setWebhook(`https://${AZURE_DOMAIN}${SECRET_PATH}`);
-  }
 });
