@@ -9,6 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const { Telegraf, Markup } = require('telegraf');
 const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
+const { setupBot } = require('./bot');
 
 require('dotenv').config();
 
@@ -27,6 +28,18 @@ const XUI_URL = (process.env.XUI_URL || '').replace(/\/$/, '');
 const XUI_INBOUND_ID = parseInt(process.env.XUI_INBOUND_ID || 5);
 const TARGET_SERVER = process.env.DEFAULT_TARGET_SERVER || 'cdn.kidy.care:443';
 const TARGET_PATH = process.env.DEFAULT_TARGET_PATH || '/azure-relay/';
+
+const xuiFunctions = {
+  createClient: createSanaeiClient,
+  getUsage: getSanaeiUsage,
+  refreshCache: updateRoutingCache,
+};
+
+const appConfig = {
+  domain: AZURE_DOMAIN,
+};
+
+setupBot(bot, supabase, xuiFunctions, appConfig);
 
 // ==========================================
 // 1. توابع API سنایی (بدون تغییر)
