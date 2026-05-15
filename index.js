@@ -42,17 +42,42 @@ const xuiClient = axios.create({
 });
 
 async function xuiLogin() {
+  const XUI_URL = (process.env.XUI_URL || '').replace(/\/$/, '');
   const payload = new URLSearchParams({
     username: process.env.XUI_USERNAME,
     password: process.env.XUI_PASSWORD,
   });
-  const res = await xuiClient.post(`${XUI_URL}/login`, payload, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  });
-  if (res.data && res.data.success === false) throw new Error(res.data.msg);
-  const cookies = res.headers['set-cookie'];
-  if (!cookies || cookies.length === 0) throw new Error('کوکی صادر نشد');
-  return cookies[0].split(';')[0];
+
+  try {
+    const res = await xuiClient.post(`${XUI_URL}/login`, payload, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      maxRedirects: 0, // 🔴 بسیار مهم: جلوگیری از دنبال کردن ریدایرکت
+    });
+
+    // اگر پنل مستقیما 200 داد
+    if (res.data && res.data.success === false) throw new Error(res.data.msg);
+
+    const cookies = res.headers['set-cookie'];
+    if (!cookies || cookies.length === 0)
+      throw new Error('سرور لاگین شد اما کوکی نداد');
+    return cookies[0].split(';')[0];
+  } catch (error) {
+    // پنل سنایی معمولاً در صورت لاگین موفق، 302 ریدایرکت می‌دهد که اینجا شکار می‌شود
+    if (
+      error.response &&
+      (error.response.status === 302 || error.response.status === 303)
+    ) {
+      const cookies = error.response.headers['set-cookie'];
+      if (cookies && cookies.length > 0) {
+        return cookies[0].split(';')[0];
+      }
+      throw new Error('ریدایرکت انجام شد اما کوکی در هدر نبود');
+    }
+
+    // اگر خطای دیگری بود (مثلا یوزر و پسورد اشتباه)
+    const errMsg = error.response?.data?.msg || error.message;
+    throw new Error(errMsg);
+  }
 }
 
 async function createSanaeiClient(uuid, tgId, gbLimit) {
